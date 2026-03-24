@@ -2,38 +2,61 @@
 
 ## Overview
 
-eCapture (旁观者) is an eBPF-based tool for capturing SSL/TLS plaintext without a CA certificate. It supports multiple encryption libraries (OpenSSL, GnuTLS, NSPR, BoringSSL, GoTLS) and provides audit capabilities for Bash, MySQL, and PostgreSQL applications.
+eCapture is an eBPF-based tool for capturing SSL/TLS plaintext without a CA certificate. It supports multiple encryption libraries (OpenSSL, GnuTLS, NSPR, BoringSSL, GoTLS) and provides audit capabilities for Bash, MySQL, and PostgreSQL applications.
 
 **Project Statistics:**
-- Total Go files: ~126 (cli: 20, pkg: 38, user: 68)
+- Total Go files: ~130+ (cli: 20+, pkg: 38+, internal: 70+)
 - eBPF kernel files: 36 C files, 20 header files
 - Programming languages: Go, C (eBPF), Protobuf
 - Minimum kernel: Linux/Android x86_64 4.18+, aarch64 5.5+
 - Requires ROOT privileges
+- Go version: 1.24.3+
 
 ---
 
 ## Directory Structure
 
 ```
-/extend/code/github/ecapture/
+/Users/pengyejun/github/ecapture/
 ├── cli/                    # Command-line interface (main entry point)
+│   ├── cmd/               # Cobra command definitions
+│   ├── http/              # HTTP config server
+│   └── cobrautl/          # Cobra utilities
 ├── kern/                   # eBPF kernel-space programs (C code)
-├── user/                   # User-space Go code (core logic)
-│   ├── config/             # Module configurations
-│   ├── event/              # Event structures and decoders
-│   └── module/             # BPF probe modules
+├── internal/               # Internal core code (NEW ARCHITECTURE, was user/)
+│   ├── domain/            # Domain interfaces and definitions
+│   ├── probe/             # Probe implementations
+│   │   ├── base/          # Base probe class
+│   │   ├── base/handlers/ # Output handlers (text, keylog, pcap)
+│   │   ├── openssl/       # OpenSSL probe
+│   │   ├── gnutls/        # GnuTLS probe
+│   │   ├── gotls/         # GoTLS probe
+│   │   ├── nspr/          # NSPR probe
+│   │   ├── bash/          # Bash probe
+│   │   ├── zsh/           # Zsh probe
+│   │   ├── mysql/         # MySQL probe
+│   │   └── postgres/      # PostgreSQL probe
+│   ├── config/            # Configuration management
+│   ├── events/            # Event dispatching
+│   ├── output/            # Output processing
+│   │   ├── encoders/      # Output encoders (json, plain, protobuf)
+│   │   └── writers/       # Output writers (file, tcp, ws, stdout)
+│   ├── factory/           # Factory pattern for probes
+│   ├── logger/            # Logger wrapper
+│   ├── errors/            # Error handling
+│   └── builder/           # Config builder
 ├── pkg/                    # Shared utility packages
-│   ├── ecaptureq/          # eCaptureQ WebSocket server
-│   ├── event_processor/     # HTTP/TLS event processing
-│   ├── proc/               # Process/ELF parsing utilities
-│   ├── upgrade/            # Version upgrade checking
+│   ├── ecaptureq/         # eCaptureQ WebSocket server
+│   ├── event_processor/   # HTTP/TLS event processing (legacy)
+│   ├── proc/              # Process/ELF parsing utilities
+│   ├── upgrade/           # Version upgrade checking
 │   └── util/              # General utilities (ebpf, kernel, etc.)
 ├── protobuf/               # Protocol Buffers definitions
 │   ├── proto/              # .proto schema files
 │   └── gen/               # Generated Go code
 ├── assets/                 # Generated eBPF bytecode assets
 ├── bin/                    # Compiled binaries output
+├── bytecode/               # Compiled eBPF bytecode (*.o)
 ├── build/                  # Build artifacts
 ├── docs/                   # Documentation
 ├── examples/               # Example clients
@@ -64,37 +87,49 @@ eCapture (旁观者) is an eBPF-based tool for capturing SSL/TLS plaintext witho
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  Module Layer (user/module/)                │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
-│  │ probe IModule│◄── │ Module Base  │◄── │ register.go  ││
-│  │  interface   │    │  class      │    │             ││
-│ 1. probe_openssl.go  2. probe_gotls.go  3. probe_mysqld.go│
-│ 4. probe_gnutls.go  5. probe_nspr.go   6. probe_postgres.go│
-│ 7. probe_bash.go    8. probe_zsh.go                 │
-│ 9. probe_pcap.go    (TC/XDP packet capture)      │
+│                  Factory Layer (internal/factory/)          │
+│  Probe Factory - creates probe instances by type          │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│              Configuration Layer (user/config/)              │
+│                  Domain Layer (internal/domain/)            │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ Interfaces: Probe, Configuration, Event, EventDecoder  │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  Probe Layer (internal/probe/)              │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
-│  │ IConfig     │◄── │ BaseConfig  │◄── │ Module-specific│
-│  │  interface   │    │  (common)   │    │ configs     ││
-│  │   - openssl │    │   - gotls   │    │   - bash   ││
-│  │   - gnutls │    │   - gnutls  │    │   - mysqld ││
+│  │ BaseProbe   │◄── │  Probes     │◄── │   Handlers  ││
+│  │  (base/)    │    │             │    │             ││
+│ 1. openssl     │  2. gnutls      │  3. gotls       ││
+│ 4. nspr        │  5. bash        │  6. zsh         ││
+│ 7. mysql       │  8. postgres    │  Text/Keylog/Pcap││
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              Configuration Layer (internal/config/)          │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
+│  │ BaseConfig  │◄── │ Module-specific configs            ││
+│  │  (common)   │    │ - openssl   │    │ - gotls     ││
+│  │             │    │ - gnutls    │    │ - bash      ││
 │  └─────────────┘    └─────────────┘    └─────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│               eBPF Layer (kern/)                         │
+│               eBPF Layer (kern/)                          │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │ Kernel Programs (C with eBPF)                    │    │
-│  │  - openssl_*_kern.c   (13 OpenSSL versions)        │    │
-│  │  - boringssl_*_kern.c (4 BoringSSL versions)      │    │
-│  │  - gnutls_*_kern.c    (6 GnuTLS versions)       │    │
-│ugs  │  - nspr_kern.c       (NSS/NSPR)                │    │
-│  │  - gotls_kern.c      (Go TLS)                  │    │
+│  │ Kernel Programs (C with eBPF)                      │    │
+│  │  - openssl_*_kern.c   (17 OpenSSL versions)       │    │
+│  │  - boringssl_*_kern.c (5 BoringSSL versions)       │    │
+│  │  - gnutls_*_kern.c    (8 GnuTLS versions)        │    │
+│  │  - nspr_kern.c       (NSS/NSPR)                 │    │
+│  │  - gotls_kern.c      (Go TLS)                   │    │
 │  │  - bash_kern.c, zsh_kern.c                    │    │
 │  │  - mysqld_kern.c, postgres_kern.c               │    │
 │  └─────────────────────────────────────────────────────────┘    │
@@ -108,33 +143,20 @@ eCapture (旁观者) is an eBPF-based tool for capturing SSL/TLS plaintext witho
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│              Event Layer (user/event/)                      │
+│              Events Layer (internal/events/)               │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
-│  │ IEventStruct │◄── │ Base struct  │◄── │ Events      ││
-│  │  interface   │    │  (common)   │    │ for each    ││
-│  │             │    │             │    │ module      ││
-│  │ Decode()    │    │ String()    │    │ - event_openssl.go   │
-│  │ Payload()   │    │ PayloadLen() │    │ - event_gotls.go     │
-│  │ ToProtoBuf()│    │ Clone()     │    │ - event_gnutls.go    │
+│  │ Dispatcher  │◄── │   Event     │◄── │   Handler   ││
+│  │             │    │             │    │  Interface  ││
 │  └─────────────┘    └─────────────┘    └─────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│           Processing Layer (pkg/event_processor/)           │
-│  - HTTP/1.0, HTTP/1.1, HTTP/2 request/response parsing  │
-│  - Protocol detection and reconstruction                  │
-│  - PCAP/PCAPNG packet generation                     │
-└─────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                  Output Layer                             │
-│  - stdout (console)                                    │
-│  - file (with rotation)                                │
-│  - TCP socket                                          │
-│  - WebSocket (eCaptureQ protocol)                         │
-│  - Protobuf encoded events                                │
+│           Output Layer (internal/output/)                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ Encoders: JSON, PlainText, Protobuf                  │    │
+│  │ Writers: File, TCP, WebSocket, Stdout, Keylog, Pcap  │    │
+│  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -154,7 +176,7 @@ eCapture (旁观者) is an eBPF-based tool for capturing SSL/TLS plaintext witho
 | `tls.go` | OpenSSL/BoringSSL capture | OpenSSL Module |
 | `gotls.go` | Go TLS capture | GoTLS Module |
 | `gnutls.go` | GnuTLS capture | GnuTLS Module |
-| `nspr.go` | NSS/NSPR capture | NSPR Module |
+| `nss.go` | NSS/NSPR capture | NSPR Module |
 | `bash.go` | Bash command audit | Bash Module |
 | `zsh.go` | Zsh command audit | Zsh Module |
 | `mysqld.go` | MySQL query audit | MySQL Module |
@@ -163,7 +185,8 @@ eCapture (旁观者) is an eBPF-based tool for capturing SSL/TLS plaintext witho
 
 **HTTP Server (`cli/http/`):**
 - `server.go` - HTTP server for runtime config updates
-- `server_linux.go` / `server_androidgki.go` - Platform-specific
+- `server_linux.go` / `server_ecandroid.go` - Platform-specific
+- `config_factory.go` - Config factory for different platforms
 - `resp.go` - Response helpers
 - `logger.go` - HTTP logger
 
@@ -179,99 +202,130 @@ eCapture (旁观者) is an eBPF-based tool for capturing SSL/TLS plaintext witho
 - `--ecaptureq` - eCaptureQ listening server
 - `--listen` - HTTP config update server port
 - `--tsize` (-t) - Truncate size in text mode
+- `--eventroratesize` - Event collector file rotation size
+- `--eventroratetime` - Event collector file rotation time
 
-### 2. Module Layer (`user/module/`)
+### 2. Domain Layer (`internal/domain/`)
 
-**Base Architecture:**
+**Core Interfaces:**
 
-**Interface (`imodule.go`) - Core methods:**
 ```go
-type IModule interface {
-    Init(context.Context, *zerolog.Logger, config.IConfig, io.Writer) error
-    Name() string
-    Run() error
-    Start() error
-    Stop() error
+// Probe defines the interface for all eBPF probes
+type Probe interface {
+    Initialize(ctx context.Context, config Configuration) error
+    Start(ctx context.Context) error
+    Stop(ctx context.Context) error
     Close() error
-    SetChild(module IModule)
-    Decode(*ebpf.Map, []byte) (event.IEventStruct, error)
+    Name() string
+    IsRunning() bool
     Events() []*ebpf.Map
-    DecodeFun(p *ebpf.Map) (event.IEventStruct, bool)
-    Dispatcher(event.IEventStruct)
+}
+
+// Configuration defines the interface for probe configuration
+type Configuration interface {
+    Validate() error
+    GetPid() uint64
+    GetUid() uint64
+    GetDebug() bool
+    GetHex() bool
+    GetBTF() uint8
+    GetPerCpuMapSize() int
+    GetTruncateSize() uint64
+    EnableGlobalVar() bool
+    GetByteCodeFileMode() uint8
+    Bytes() []byte
+    GetLoggerAddr() string
+    SetLoggerAddr(addr string)
+    GetEventCollectorAddr() string
+    SetEventCollectorAddr(addr string)
+}
+
+// Event defines the interface for all events
+type Event interface {
+    // ... event methods
+}
+
+// EventDecoder defines the interface for decoding events
+type EventDecoder interface {
+    Decode(em *ebpf.Map, data []byte) (Event, error)
+    GetDecoder(em *ebpf.Map) (Event, bool)
 }
 ```
 
-**Module Registry (`register.go`):**
-- `RegisteFunc()` - Register module factories
-- `GetModuleFunc()` - Retrieve module by name
+### 3. Probe Layer (`internal/probe/`)
 
-**Base Module (`imodule.go`) - Implementation:**
-- BTF mode auto-detection (kernel/container detection)
+**Base Architecture:**
+
+**BaseProbe (`internal/probe/base/base_probe.go`) - Core implementation:**
+- Common probe initialization
 - Event reader management (perf/ringbuf)
-- Event dispatching and processing
+- Event dispatcher setup
 - Context-based lifecycle management
+- Resources cleanup
+
+**Handlers (`internal/probe/base/handlers/`):**
+- `text_handler.go` - Text output handler
+- `keylog_handler.go` - Keylog output handler
+- `pcap_handler.go` - PCAP/PCAPNG output handler
 
 **Probe Modules:**
 
 | Module | File | Capture Mode |
 |--------|-------|--------------|
-| OpenSSL | `probe_openssl.go` | text/pcap/keylog |
-| OpenSSL PCAP | `probe_openssl_pcap.go` | PCAP/PCAPNG |
-| OpenSSL Keylog | `probe_openssl_keylog.go` | Master Secret |
-| OpenSSL Text | `probe_openssl_text.go` | Plaintext |
-| OpenSSL Lib | `probe_openssl_lib.go` | Library detection |
-| GoTLS | `probe_gotls.go` | text/pcap/keylog |
-| GoTLS Text | `probe_gotls_text.go` | Plaintext |
-| GoTLS Keylog | `probe_gotls_keylog.go` | Master Secret |
-| GoTLS PCAP | `probe_gotls_pcap.go` | PCAP/PCAPNG |
-| GnuTLS | `probe_gnutls.go` | text/pcap/keylog |
-| GnuTLS Keylog | `probe_gnutls_keylog.go` | Master Secret |
-| GnuTLS PCAP | `probe_gnutls_pcap.go` | PCAP/PCAPNG |
-| GnuTLS Text | `probe_gnutls_text.go` | Plaintext |
-| GnuTLS Lib | `probe_gnutls_lib.go` | Library detection |
-| NSPR | `probe_nspr.go` | text/pcap/keylog |
-| Bash | `probe_bash.go` | Command audit |
-| Zsh | `probe_zsh.go` | Command audit |
-| MySQL | `probe_mysqld.go` | Query audit |
-| PostgreSQL | `probe_postgres.go` | Query audit |
-| PCAP | `probe_pcap.go` | TC/XDP packet capture |
+| OpenSSL | `openssl/` | text/pcap/keylog |
+| GnuTLS | `gnutls/` | text/pcap/keylog |
+| GoTLS | `gotls/` | text/pcap/keylog |
+| NSPR | `nspr/` | text/pcap/keylog |
+| Bash | `bash/` | Command audit |
+| Zsh | `zsh/` | Command audit |
+| MySQL | `mysql/` | Query audit |
+| PostgreSQL | `postgres/` | Query audit |
 
-**Module Lifecycle:**
+**Probe Lifecycle:**
 ```
-1. Init() - Initialize config, maps, readers
-2. Run() - Start child module
-3. readEvents() - Create perf/ringbuf readers
-4. Event Loop:
-   - Read from kernel space
+1. Initialize() - Set up config, dispatcher, handlers
+2. Start() - Load eBPF bytecode, attach probes, start readers
+3. Event Loop:
+   - Read from kernel space (perf/ringbuf)
    - Decode events
-   - Dispatch to processor/collector
-5. Close() - Cleanup resources
+   - Dispatch to handlers
+4. Stop() - Halt event collection
+5. Close() - Cleanup all resources
 ```
 
-### 3. Configuration Layer (`user/config/`)
+### 4. Factory Layer (`internal/factory/`)
 
-**Interface (`iconfig.go`):**
+**Probe Factory (`probe_factory.go`):**
 ```go
-type IConfig interface {
-    Check() error
-    GetPid() uint64
-    GetUid() uint64
-    GetHex() bool
-    GetBTF() uint8
-    GetDebug() bool
-    GetByteCodeFileMode() uint8
-    // ... setters and getters
-    Bytes() []byte  // JSON serialization
-}
+type ProbeType string
+
+const (
+    ProbeTypeBash     ProbeType = "Bash"
+    ProbeTypeZsh      ProbeType = "Zsh"
+    ProbeTypeMySQL    ProbeType = "MySQL"
+    ProbeTypePostgres ProbeType = "postgres"
+    ProbeTypeOpenSSL  ProbeType = "OpenSSL"
+    ProbeTypeGnuTLS   ProbeType = "GnuTLS"
+    ProbeTypeNSPR     ProbeType = "NSPR"
+    ProbeTypeGoTLS    ProbeType = "GoTLS"
+)
+
+// CreateProbe creates a new probe instance
+func CreateProbe(probeType ProbeType) (domain.Probe, error)
+
+// RegisterProbe registers a probe constructor
+func RegisterProbe(probeType ProbeType, constructor ProbeConstructor) error
 ```
 
-**Base Configuration (`common.go`):**
+### 5. Configuration Layer (`internal/config/`)
+
+**Base Configuration (`base_config.go`):**
 ```go
 type BaseConfig struct {
-    Pid          uint64
-    Uid          uint64
-    Listen       string
-    TruncateSize uint64
+    Pid                uint64
+    Uid                uint64
+    Listen             string
+    TruncateSize       uint64
     PerCpuMapSize      int
     IsHex              bool
     Debug              bool
@@ -285,43 +339,43 @@ type BaseConfig struct {
 ```
 
 **Module-Specific Configs:**
-- `config_openssl.go` - OpenSSL/BoringSSL config
-- `config_gnutls.go` - GnuTLS config
-- `config_gotls.go` - GoTLS config
-- `config_nspr.go` - NSS/NSPR config
-- `config_bash.go` - Bash config
-- `config_zsh.go` - Zsh config
-- `config_mysqld.go` - MySQL config
-- `config_postgres.go` - PostgreSQL config
+- `openssl/config.go` - OpenSSL/BoringSSL config
+- `gnutls/config.go` - GnuTLS config
+- `gotls/config.go` - GoTLS config
+- `nspr/config.go` - NSS/NSPR config
+- `bash/config.go` - Bash config
+- `mysql/config.go` - MySQL config
+- `postgres/config.go` - PostgreSQL config
 
 **Platform Variants:**
-- `common_linux.go` - Linux-specific
-- `common_androidgki.go` - Android GKI-specific
-- `config_openssl_linux.go` / `config_openssl_androidgki.go`
-- `config_gnutls_linux.go` / `config_gnutls_androidgki.go`
-- `config_nspr_linux.go` / `config_nspr_androidgki.go`
+- `openssl/config_linux.go` / `openssl/config_ecandroid.go`
+- `gnutls/config_linux.go` / `gnutls/config_ecandroid.go`
 
-**Constants:**
-```go
-// Capture modes
-TlsCaptureModelText   = "text"
-TlsCaptureModelPcap   = "pcap"
-TlsCaptureModelPcapngng = "pcapng"
-TlsCaptureModelKey    = "key"
-TlsCaptureModelKeylog = "keylog"
+### 6. Events Layer (`internal/events/`)
 
-// BTF modes
-BTFModeAutoDetect = 0
-BTFModeCore       = 1
-BTFModeNonCore    = 2
+**Dispatcher (`dispatcher.go`):**
+- Register handlers
+- Dispatch events to all registered handlers
+- Manage handler lifecycle
 
-// Bytecode file modes
-ByteCodeFileAll     = 0
-ByteCodeFileCore    = 1
-ByteCodeFileNonCore = 2
-```
+### 7. Output Layer (`internal/output/`)
 
-### 4. eBPF Kernel Layer (`kern/`)
+**Encoders (`output/encoders/`):**
+- `json_encoder.go` - JSON format encoding
+- `plain_encoder.go` - Plain text encoding
+- `protobuf_encoder.go` - Protobuf encoding
+
+**Writers (`output/writers/`):**
+- `stdout_writer.go` - Console output
+- `file_writer.go` - File output (with optional rotation)
+- `tcp_writer.go` - TCP socket output
+- `websocket_writer.go` - WebSocket output
+- `keylog_writer.go` - SSL key log format
+- `pcap_writer.go` - PCAP/PCAPNG format
+- `logger_writer.go` - Logger-based output
+- `factory.go` - Writer factory
+
+### 8. eBPF Kernel Layer (`kern/`)
 
 **Core Headers:**
 
@@ -357,7 +411,7 @@ const volatile u64 target_uid = 0;
 
 **Kernel Programs:**
 
-**OpenSSL/BoringSSL (13 versions):**
+**OpenSSL/BoringSSL (17+5 versions):**
 - `openssl_1_0_2a_kern.c` - OpenSSL 1.0.2
 - `openssl_1_1_0a_kern.c` - OpenSSL 1.1.0
 - `openssl_1_1_1a_kern.c` - OpenSSL 1.1.1 (alpha)
@@ -377,10 +431,10 @@ const volatile u64 target_uid = 0;
 - `openssl_3_4_1_kern.c` - OpenSSL 3.4.1
 - `openssl_3_5_0_kern.c` - OpenSSL 3.5.0
 - `boringssl_na_kern.c` - BoringSSL (native)
-- `boringssl_a_13_kern.c` - BoringSSL (arm 1.3)
-- `boringssl_a_14_kern.c` - BoringSSL (arm 1.4)
-- `boringssl_a_15_kern.c` - BoringSSL (arm 1.5)
-- `boringssl_a_16_kern.c` - BoringSSL (arm 1.6)
+- `boringssl_a_13_kern.c` - BoringSSL (Android 13)
+- `boringssl_a_14_kern.c` - BoringSSL (Android 14)
+- `boringssl_a_15_kern.c` - BoringSSL (Android 15)
+- `boringssl_a_16_kern.c` - BoringSSL (Android 16)
 
 **Other Libraries:**
 - `gotls_kern.c` - Go TLS (crypto/tls)
@@ -405,96 +459,12 @@ const volatile u64 target_uid = 0;
 - `SEC("tc")` - Traffic control (TC)
 - `SEC("tracepoint")` - Kernel tracepoints
 
-### 5. Event Layer (`user/event/`)
-
-**Interface (`ievent.go`):**
-```go
-type IEventStruct interface {
-    Decode(payload []byte) (err error)
-    Payload() []byte
-    PayloadLen() int
-    String() string
-    StringHex() string
-    Clone() IEventStruct
-    EventType() Type
-    GetUUID() string
-    Base() Base
-    ToProtobufEvent() *pb.Event
-}
-```
-
-**Event Types:**
-- `TypeOutput` - Upload to server or write to log file
-- `TypeModuleData` - Module cache data
-- `TypeEventProcessor` - Display by event_processor
-
-**Base Structure (`event_base.go`):**
-```go
-type Base struct {
-    Timestamp int64  `json:"timestamp"`
-    UUID      string `json:"uuid"`
-    SrcIP     string `json:"src_ip"`
-    SrcPort   uint32 `json:"src_port"`
-    DstIP     string `json:"dst_ip"`
-    DstPort   uint32 `json:"dst_port"`
-    PID       int64  `json:"pid"`
-    PName     string `json:"pname"`
-    Type      uint32 `json:"type"`
-    Length    uint32 `json:"length"`
-}
-```
-
-**Module-Specific Events:**
-- `event_openssl.go` - OpenSSL/BoringSSL events
-- `event_gotls.go` - GoTLS events
-- `event_gnutls.go` - GnuTLS events
-- `event_nspr.go` - NSS/NSPR events
-- `event_bash.go` - Bash command events
-- `event_zsh.go` - Zsh command events
-- `event_mysqld.go` - MySQL query events
-- `event_postgres.go` - PostgreSQL query events
-
-**Special Events:**
-- `event_masterkey.go` - Master secret events
-- `event_mastersecret_gotls.go` - GoTLS master secret
-- `event_mastersecret_gnutls.go` - GnuTLS master secret
-- `event_openssl_tc.go` - OpenSSL TC packet events
-- `misc.go` - Miscellaneous utilities
-
-**Collector Writer:**
-```go
-type CollectorWriter struct {
-    logger *zerolog.Logger
-}
-```
-
-### 6. Processing Layer (`pkg/event_processor/`)
-
-**Components:**
-
-| File | Description |
-|------|-------------|
-| `processor.go` | Main event processor |
-| `http_request.go` | HTTP/1.x request parsing |
-| `http_response.go` | HTTP/1.x response parsing |
-| `http2_request.go` | HTTP/2 request parsing |
-| `http2_response.go` | HTTP/2 response parsing |
-| `iworker.go` | Worker interface |
-| `iparser.go` | Parser interface |
-
-**HTTP Parser Features:**
-- HTTP/1.0, HTTP/1.1, HTTP/2 support
-- Header parsing and display
-- Body content extraction
-- Protocol detection
-- HPACK (HTTP/2 header compression)
-
-### 7. Utility Packages (`pkg/`)
+### 9. Utility Packages (`pkg/`)
 
 | Package | Description |
 |---------|-------------|
 | `ecaptureq/` | WebSocket server for eCaptureQ protocol |
-| `event_processor/` | HTTP/TLS event processing |
+| `event_processor/` | HTTP/TLS event processing (legacy) |
 | `proc/` | Process and ELF file utilities |
 | `upgrade/` | Version upgrade checking (GitHub releases) |
 | `util/ebpf/` | eBPF environment utilities |
@@ -504,24 +474,7 @@ type CollectorWriter struct {
 | `util/roratelog/` | Rotatable log file writer |
 | `util/ws/` | WebSocket client |
 
-**eCaptureQ Package (`pkg/ecaptureq/`):**
-- `server.go` - WebSocket server
-- `client.go` - WebSocket client
-- `hub.go` - Connection hub
-
-### 8. Protobuf Layer (`protobuf/`)
-
-**Protocol Buffers for eCaptureQ communication:**
-
-**Schema (`protobuf/proto/v1/`):**
-- Define event structures for cross-platform communication
-- Version 1 protocol specification
-
-**Generated Code (`protobuf/gen/v1/`):**
-- Go code generated from .proto files
-- Used by eCaptureQ client/server
-
-### 9. Build System
+### 10. Build System
 
 **Makefile Structure:**
 
@@ -548,13 +501,13 @@ type CollectorWriter struct {
 
 **Build Flow:**
 ```
-1. make ebpf
+1. make ebpf / make ebpf_noncore
    └── clang: Compile *.c → *.o (eBPF bytecode)
 
-2. make assets
+2. make assets / make assets_noncore
    └── go-bindata: Embed *.o → assets/ebpf_probe.go
 
-3. make build
+3. make build / make build_noncore
    └── go build: Compile Go + assets → bin/ecapture
 ```
 
@@ -569,17 +522,30 @@ type CollectorWriter struct {
 ### Capture Flow (OpenSSL Example)
 
 ```
-1. CLI Command: `sudo ecapture tls -m text`
+1. CLI Command: sudo ecapture tls -m text
    │
    ▼
-2. Module Initialization: probe_openssl.Init()
+2. Probe Creation: factory.CreateProbe(ProbeTypeOpenSSL)
+   ├─ Get constructor from registry
+   └─ Create probe instance
+   │
+   ▼
+3. Probe Initialization: probe.Initialize(ctx, config)
+   ├─ BaseProbe: Create dispatcher
+   ├─ BaseProbe: Create output handlers
+   ├─ BaseProbe: Register handlers
+   └─ OpenSSLProbe: Version-specific setup
+   │
+   ▼
+4. Probe Start: probe.Start(ctx)
    ├─ Load eBPF bytecode from assets
    ├─ Load eBPF program into kernel
-   ├─ Attach kprobes/uprobes to SSL functions
-   └─ Create perf/ringbuf event maps
+   ├─ Attach uprobes/kprobes/TC to functions
+   ├─ Retrieve event maps
+   └─ Start perf/ringbuf event readers
    │
    ▼
-3. Kernel Space (eBPF Program)
+5. Kernel Space (eBPF Program)
    ├─ Hook SSL_write() / SSL_read() functions
    ├─ Capture plaintext data
    ├─ Extract connection tuple (src/dst IP:port)
@@ -587,21 +553,21 @@ type CollectorWriter struct {
    └─ Return from hook
    │
    ▼
-4. User Space Event Loop
-   ├─ Read event from perf/ringbuf
-   ├─ Decode event (event_openssl.Decode())
-   ├─ Process event (event_processor)
-   └─ Output to console/file/socket
+6. User Space Event Loop
+   ├─ Read event from perf/ringbuf (perfEventLoop)
+   ├─ Decode event (decoder.Decode())
+   ├─ Dispatch event (dispatcher.Dispatch())
+   └─ Handlers process and output
    │
    ▼
-5. Display
+7. Output
    └─ Print plaintext or save to file
 ```
 
 ### eCaptureQ Flow
 
 ```
-1. Server Mode: `sudo ecapture --ecaptureq=:8090 tls`
+1. Server Mode: sudo ecapture --ecaptureq=:8090 tls
    │
    ▼
 2. WebSocket Server Start
@@ -624,30 +590,43 @@ type CollectorWriter struct {
 
 ## Key Design Patterns
 
-### 1. Module Registry Pattern
-- Modules self-register via `RegisteFunc()`
-- Lookup by name via `GetModuleFunc()`
-- Enables dynamic module loading
+### 1. Factory Pattern
+- Probes self-register via `factory.RegisterProbe()`
+- Lookup by name via `factory.CreateProbe()`
+- Enables dynamic probe loading
 
-### 2. Interface-Based Architecture
-- `IModule` for all probe modules
-- `IConfig` for all configurations
-- `IEventStruct` for all events
+### 2. Interface-Based Architecture (NEW in v2)
+- `domain.Probe` for all probes
+- `domain.Configuration` for all configurations
+- `domain.Event` for all events
+- `domain.EventDecoder` for event decoders
 - Enables polymorphism and testing
+- Clean separation of concerns
 
-### 3. BTF Auto-Detection
+### 3. Handler Pattern (NEW in v2)
+- Output logic separated into Handlers
+- TextHandler, KeylogHandler, PcapHandler
+- Flexible composition of multiple outputs
+- Easy to add new output formats
+
+### 4. Domain-Driven Design (NEW in v2)
+- `internal/domain/` - Pure interface definitions
+- No external dependencies in domain layer
+- Easy to mock and test
+
+### 5. BTF Auto-Detection
 - Detect kernel BTF support
 - Choose CORE or non-CORE bytecode
 - Fall back to non-CORE on failure
 
-### 4. Event Processing Pipeline
+### 6. Event Processing Pipeline
 ```
-eBPF → Event → Decode → Process → Output
-  ↑                                        ↓
-  └────────── Config ───────────────────────┘
+eBPF → Event → Decode → Dispatcher → Handler(s) → Output
+  ↑                                              ↓
+  └────────── Config ────────────────────────────┘
 ```
 
-### 5. Platform Abstraction
+### 7. Platform Abstraction
 - Build tags for Linux/Android
 - Platform-specific implementations
 - Conditional compilation
@@ -673,32 +652,34 @@ eBPF → Event → Decode → Process → Output
 
 ## Development Guide
 
-### Adding a New Module
+### Adding a New Probe (NEW Architecture)
 
 1. **Create eBPF Program** (`kern/mylib_kern.c`)
    - Define hook functions
    - Capture and send events
 
-2. **Create Event Structure** (`user/event/event_mylib.go`)
-   - Implement `IEventStruct`
-   - Define decode logic
+2. **Define Domain Types** (if needed)
+   - Add to `internal/domain/` if new interfaces needed
 
-3. **Create Configuration** (`user/config/config_mylib.go`)
-   - Implement `IConfig`
-   - Define module-specific flags
+3. **Create Event Structure** (`internal/probe/mylib/event.go`)
+   - Implement event decoding
 
-4. **Create Module** (`user/module/probe_mylib.go`)
-   - Implement `IModule`
-   - Register with `RegisteFunc()`
+4. **Create Configuration** (`internal/probe/mylib/config.go`)
+   - Implement `domain.Configuration`
 
-5. **Create CLI Command** (`cli/cmd/mylib.go`)
+5. **Create Probe** (`internal/probe/mylib/mylib_probe.go`)
+   - Embed `base.BaseProbe`
+   - Implement probe-specific logic
+   - Register with `factory.RegisterProbe()` in `init()`
+
+6. **Create CLI Command** (`cli/cmd/mylib.go`)
    - Add Cobra command
-   - Call `runModule()`
+   - Call `runProbe()`
 
-6. **Update Makefile**
-   - Add to `*TARGETS` or `TARGETS_NOCORE`
+7. **Update Makefile**
+   - Add to `TARGETS`
 
-7. **Rebuild**
+8. **Rebuild**
    ```bash
    make clean && make
    ```
@@ -729,10 +710,10 @@ dlv debug bin/ecapture -- --tls
 
 | Category | Count |
 |----------|--------|
-| CLI Go files | 20 |
-| pkg Go files | 38 |
-| user Go files | 68 |
-| Total Go files | ~126 |
+| CLI Go files | 20+ |
+| pkg Go files | 38+ |
+| internal Go files | 70+ |
+| Total Go files | ~130+ |
 | eBPF C files | 36 |
 | eBPF headers | 20 |
 | Protobuf files | variable |
@@ -769,12 +750,39 @@ go test ./...
 make e2e-tls      # TLS module
 make e2e-gnutls    # GnuTLS module
 make e2e-gotls     # GoTLS module
+make e2e-bash      # Bash module
 make e2e            # All tests
 ```
 
 **Test Locations:**
 - `test/e2e/` - E2E test scripts
 - `*_test.go` - Unit tests
+
+---
+
+## Architecture Migration Notes (v1 → v2)
+
+### Key Changes from v1 to v2:
+
+1. **Directory Restructuring**
+   - `user/` → `internal/`
+   - New `domain/`, `events/`, `output/`, `factory/`, `errors/`, `logger/` packages
+
+2. **Interface-Driven Design**
+   - Pure domain interfaces in `internal/domain/`
+   - Better separation of concerns
+
+3. **Handler Pattern**
+   - Output logic moved to Handlers
+   - More flexible output composition
+
+4. **Error Package**
+   - Centralized error definitions
+   - Better error wrapping and codes
+
+### Backward Compatibility:
+- Legacy `pkg/event_processor/` still exists
+- Gradual migration possible
 
 ---
 
@@ -787,5 +795,6 @@ make e2e            # All tests
 
 ---
 
-*Generated: 2026-03-21*
-*Project: eCapture v1.5.2*
+*Generated: 2026-03-24*
+*Project: eCapture v2.0.1*
+*Architecture: v2 (internal/ layer)*

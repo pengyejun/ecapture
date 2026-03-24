@@ -5,27 +5,49 @@
 eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA 证书的情况下捕获 SSL/TLS 明文。它支持多种加密库（OpenSSL、GnuTLS、NSPR、BoringSSL、GoTLS），并为 Bash、MySQL 和 PostgreSQL 应用程序提供审计功能。
 
 **项目统计：**
-- Go 文件总数：~126 个（cli: 20，pkg: 38，user: 68）
+- Go 文件总数：~130+ 个（cli: 20+，pkg: 38+，internal: 70+）
 - eBPF 内核文件：36 个 C 文件，20 个头文件
 - 编程语言：Go、C（eBPF）、Protobuf
 - 最低内核版本：Linux/Android x86_64 4.18+、aarch64 5.5+
 - 需要 ROOT 权限
+- Go 版本：1.24.3+
 
 ---
 
 ## 目录结构
 
 ```
-/extend/code/github/ecapture/
+/Users/pengyejun/github/ecapture/
 ├── cli/                    # 命令行接口（主入口点）
+│   ├── cmd/               # Cobra 命令定义
+│   ├── http/              # HTTP 配置服务器
+│   └── cobrautl/          # Cobra 工具
 ├── kern/                   # eBPF 内核空间程序（C 代码）
-├── user/                   # 用户空间 Go 代码（核心逻辑）
-│   ├── config/             # 模块配置
-│   ├── event/              # 事件结构和解码器
-│   └── module/             # BPF 探针模块
+├── internal/               # 内部核心代码（新架构，原 user/）
+│   ├── domain/            # 领域接口和定义
+│   ├── probe/             # 探针实现
+│   │   ├── base/          # 基础探针类
+│   │   ├── base/handlers/ # 输出处理器（text, keylog, pcap）
+│   │   ├── openssl/       # OpenSSL 探针
+│   │   ├── gnutls/        # GnuTLS 探针
+│   │   ├── gotls/         # GoTLS 探针
+│   │   ├── nspr/          # NSPR 探针
+│   │   ├── bash/          # Bash 探针
+│   │   ├── zsh/           # Zsh 探针
+│   │   ├── mysql/         # MySQL 探针
+│   │   └── postgres/      # PostgreSQL 探针
+│   ├── config/            # 配置管理
+│   ├── events/            # 事件分发
+│   ├── output/            # 输出处理
+│   │   ├── encoders/      # 输出编码器（json, plain, protobuf）
+│   │   └── writers/       # 输出写入器（file, tcp, ws, stdout）
+│   ├── factory/           # 探针工厂模式
+│   ├── logger/            # 日志封装
+│   ├── errors/            # 错误处理
+│   └── builder/           # 配置构建器
 ├── pkg/                    # 共享工具包
 │   ├── ecaptureq/          # eCaptureQ WebSocket 服务器
-│   ├── event_processor/     # HTTP/TLS 事件处理
+│   ├── event_processor/     # HTTP/TLS 事件处理（遗留）
 │   ├── proc/               # 进程/ELF 解析工具
 │   ├── upgrade/            # 版本升级检查
 │   └── util/              # 通用工具（ebpf、kernel 等）
@@ -34,6 +56,7 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
 │   └── gen/               # 生成的 Go 代码
 ├── assets/                 # 生成的 eBPF 字节码资源
 ├── bin/                    # 编译后的二进制文件输出
+├── bytecode/               # 编译后的 eBPF 字节码 (*.o)
 ├── build/                  # 构建产物
 ├── docs/                   # 文档
 ├── examples/               # 示例客户端
@@ -64,24 +87,36 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  模块层 (user/module/)                │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
-│  │ probe IModule│◄── │ Module Base  │◄── │ register.go  ││
-│  │  interface   │    │  class      │    │             ││
-│ 1. probe_openssl.go  2. probe_gotls.go  3. probe_mysqld.go│
-│ 4. probe_gnutls.go  5. probe_nspr.go   6. probe_postgres.go│
-│ 7. probe_bash.go    8. probe_zsh.go                 │
-│ 9. probe_pcap.go    (TC/XDP 数据包捕获)      │
+│                  工厂层 (internal/factory/)              │
+│         Probe Factory - 按类型创建探针实例                    │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│              配置层 (user/config/)                      │
+│                  领域层 (internal/domain/)              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ Interfaces: Probe, Configuration, Event, EventDecoder  │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  探针层 (internal/probe/)                │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
-│  │ IConfig     │◄── │ BaseConfig  │◄── │ Module-specific│
-│  │  interface   │    │  (common)   │    │ configs     ││
-│  │   - openssl │    │   - gotls   │    │   - bash   ││
-│  │   - gnutls │    │   - gnutls  │    │   - mysqld ││
+│  │ BaseProbe   │◄── │  Probes     │◄── │   Handlers  ││
+│  │  (base/)    │    │             │    │             ││
+│ 1. openssl     │  2. gnutls      │  3. gotls       ││
+│ 4. nspr        │  5. bash        │  6. zsh         ││
+│ 7. mysql       │  8. postgres    │  Text/Keylog/Pcap││
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              配置层 (internal/config/)                  │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
+│  │ BaseConfig  │◄── │ Module-specific configs            ││
+│  │  (common)   │    │ - openssl   │    │ - gotls     ││
+│  │             │    │ - gnutls    │    │ - bash      ││
 │  └─────────────┘    └─────────────┘    └─────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
                               │
@@ -90,11 +125,11 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
 │               eBPF 层 (kern/)                          │
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │ 内核程序（C 与 eBPF）                      │    │
-│  │  - openssl_*_kern.c   (13 个 OpenSSL 版本)        │    │
-│  │  - boringssl_*_kern.c (4 个 BoringSSL 版本)      │    │
-│  │  - gnutls_*_kern.c    (6 个 GnuTLS 版本)       │    │
-│  │  - nspr_kern.c       (NSS/NSPR)                │    │
-│  │  - gotls_kern.c      (Go TLS)                  │    │
+│  │  - openssl_*_kern.c   (17 个 OpenSSL 版本)       │    │
+│  │  - boringssl_*_kern.c (5 个 BoringSSL 版本)       │    │
+│  │  - gnutls_*_kern.c    (8 个 GnuTLS 版本)        │    │
+│  │  - nspr_kern.c       (NSS/NSPR)                 │    │
+│  │  - gotls_kern.c      (Go TLS)                   │    │
 │  │  - bash_kern.c, zsh_kern.c                    │    │
 │  │  - mysqld_kern.c, postgres_kern.c               │    │
 │  └─────────────────────────────────────────────────────────┘    │
@@ -108,33 +143,20 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│              事件层 (user/event/)                        │
+│              事件层 (internal/events/)                   │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐│
-│  │ IEventStruct │◄── │ Base struct  │◄── │ Events      ││
-│  │  interface   │    │  (common)   │    │ for each    ││
-│  │             │    │             │    │ module      ││
-│  │ Decode()    │    │ String()    │    │ - event_openssl.go   │
-│  │ Payload()   │    │ PayloadLen() │    │ - event_gotls.go     │
-│  │ ToProtoBuf()│    │ Clone()     │    │ - event_gnutls.go    │
+│  │ Dispatcher  │◄── │   Event     │◄── │   Handler   ││
+│  │             │    │             │    │  Interface  ││
 │  └─────────────┘    └─────────────┘    └─────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│           处理层 (pkg/event_processor/)                │
-│  - HTTP/1.0、HTTP/1.1、HTTP/2 请求/响应解析          │
-│  - 协议检测和重构                                   │
-│  - PCAP/PCAPNG 数据包生成                          │
-└─────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                  输出层                                │
-│  - stdout（控制台）                                     │
-│  - file（支持轮转）                                   │
-│  - TCP 套接字                                         │
-│  - WebSocket（eCaptureQ 协议）                          │
-│  - Protobuf 编码事件                                    │
+│           输出层 (internal/output/)                    │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ Encoders: JSON, PlainText, Protobuf                  │    │
+│  │ Writers: File, TCP, WebSocket, Stdout, Keylog, Pcap  │    │
+│  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -154,7 +176,7 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
 | `tls.go` | OpenSSL/BoringSSL 捕获 | OpenSSL 模块 |
 | `gotls.go` | Go TLS 捕获 | GoTLS 模块 |
 | `gnutls.go` | GnuTLS 捕获 | GnuTLS 模块 |
-| `nspr.go` | NSS/NSPR 捕获 | NSPR 模块 |
+| `nss.go` | NSS/NSPR 捕获 | NSPR 模块 |
 | `bash.go` | Bash 命令审计 | Bash 模块 |
 | `zsh.go` | Zsh 命令审计 | Zsh 模块 |
 | `mysqld.go` | MySQL 查询审计 | MySQL 模块 |
@@ -163,7 +185,8 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
 
 **HTTP 服务器 (`cli/http/`)：**
 - `server.go` - 用于运行时配置更新的 HTTP 服务器
-- `server_linux.go` / `server_androidgki.go` - 平台特定实现
+- `server_linux.go` / `server_ecandroid.go` - 平台特定实现
+- `config_factory.go` - 不同平台的配置工厂
 - `resp.go` - 响应辅助函数
 - `logger.go` - HTTP 日志器
 
@@ -179,99 +202,130 @@ eCapture（旁观者）是一个基于 eBPF 的工具，可以在不使用 CA �
 - `--ecaptureq` - eCaptureQ 监听服务器
 - `--listen` - HTTP 配置更新服务器端口
 - `--tsize` (-t) - 文本模式下的截断大小
+- `--eventroratesize` - 事件收集器文件轮转大小
+- `--eventroratetime` - 事件收集器文件轮转时间
 
-### 2. 模块层 (`user/module/`)
+### 2. 领域层 (`internal/domain/`)
 
-**基础架构：**
+**核心接口：**
 
-**接口 (`imodule.go`) - 核心方法：**
 ```go
-type IModule interface {
-    Init(context.Context, *zerolog.Logger, config.IConfig, io.Writer) error
-    Name() string
-    Run() error
-    Start() error
-    Stop() error
+// Probe 定义所有 eBPF 探针的接口
+type Probe interface {
+    Initialize(ctx context.Context, config Configuration) error
+    Start(ctx context.Context) error
+    Stop(ctx context.Context) error
     Close() error
-    SetChild(module IModule)
-    Decode(*ebpf.Map, []byte) (event.IEventStruct, error)
+    Name() string
+    IsRunning() bool
     Events() []*ebpf.Map
-    DecodeFun(p *ebpf.Map) (event.IEventStruct, bool)
-    Dispatcher(event.IEventStruct)
+}
+
+// Configuration 定义探针配置的接口
+type Configuration interface {
+    Validate() error
+    GetPid() uint64
+    GetUid() uint64
+    GetDebug() bool
+    GetHex() bool
+    GetBTF() uint8
+    GetPerCpuMapSize() int
+    GetTruncateSize() uint64
+    EnableGlobalVar() bool
+    GetByteCodeFileMode() uint8
+    Bytes() []byte
+    GetLoggerAddr() string
+    SetLoggerAddr(addr string)
+    GetEventCollectorAddr() string
+    SetEventCollectorAddr(addr string)
+}
+
+// Event 定义所有事件的接口
+type Event interface {
+    // ... 事件方法
+}
+
+// EventDecoder 定义事件解码器的接口
+type EventDecoder interface {
+    Decode(em *ebpf.Map, data []byte) (Event, error)
+    GetDecoder(em *ebpf.Map) (Event, bool)
 }
 ```
 
-**模块注册器 (`register.go`)：**
-- `RegisteFunc()` - 注册模块工厂函数
-- `GetModuleFunc()` - 通过名称获取模块
+### 3. 探针层 (`internal/probe/`)
 
-**基础模块 (`imodule.go`) - 实现：**
-- BTF 模式自动检测（内核/容器检测）
+**基础架构：**
+
+**BaseProbe (`internal/probe/base/base_probe.go`) - 核心实现：**
+- 通用探针初始化
 - 事件读取器管理（perf/ringbuf）
-- 事件分发和处理
+- 事件分发器设置
 - 基于上下文的生命周期管理
+- 资源清理
+
+**Handlers (`internal/probe/base/handlers/`)：**
+- `text_handler.go` - 文本输出处理器
+- `keylog_handler.go` - Keylog 输出处理器
+- `pcap_handler.go` - PCAP/PCAPNG 输出处理器
 
 **探针模块：**
 
 | 模块 | 文件 | 捕获模式 |
 |--------|-------|--------------|
-| OpenSSL | `probe_openssl.go` | text/pcap/keylog |
-| OpenSSL PCAP | `probe_openssl_pcap.go` | PCAP/PCAPNG |
-| OpenSSL Keylog | `probe_openssl_keylog.go` | 主密钥 |
-| OpenSSL Text | `probe_openssl_text.go` | 明文 |
-| OpenSSL Lib | `probe_openssl_lib.go` | 库检测 |
-| GoTLS | `probe_gotls.go` | text/pcap/keylog |
-| GoTLS Text | `probe_gotls_text.go` | 明文 |
-| GoTLS Keylog | `probe_gotls_keylog.go` | 主密钥 |
-| GoTLS PCAP | `probe_gotls_pcap.go` | PCAP/PCAPNG |
-| GnuTLS | `probe_gnutls.go` | text/pcap/keylog |
-| GnuTLS Keylog | `probe_gnutls_keylog.go` | 主密钥 |
-| GnuTLS PCAP | `probe_gnutls_pcap.go` | PCAP/PCAPNG |
-| GnuTLS Text | `probe_gnutls_text.go` | 明文 |
-| GnuTLS Lib | `probe_gnutls_lib.go` | 库检测 |
-| NSPR | `probe_nspr.go` | text/pcap/keylog |
-| Bash | `probe_bash.go` | 命令审计 |
-| Zsh | `probe_zsh.go` | 命令审计 |
-| MySQL | `probe_mysqld.go` | 查询审计 |
-| PostgreSQL | `probe_postgres.go` | 查询审计 |
-| PCAP | `probe_pcap.go` | TC/XDP 数据包捕获 |
+| OpenSSL | `openssl/` | text/pcap/keylog |
+| GnuTLS | `gnutls/` | text/pcap/keylog |
+| GoTLS | `gotls/` | text/pcap/keylog |
+| NSPR | `nspr/` | text/pcap/keylog |
+| Bash | `bash/` | 命令审计 |
+| Zsh | `zsh/` | 命令审计 |
+| MySQL | `mysql/` | 查询审计 |
+| PostgreSQL | `postgres/` | 查询审计 |
 
-**模块生命周期：**
+**探针生命周期：**
 ```
-1. Init() - 初始化配置、maps、读取器
-2. Run() - 启动子模块
-3. readEvents() - 创建 perf/ringbuf 读取器
-4. 事件循环：
-   - 从内核空间读取
+1. Initialize() - 设置配置、分发器、处理器
+2. Start() - 加载 eBPF 字节码、附加探针、启动读取器
+3. 事件循环：
+   - 从内核空间读取（perf/ringbuf）
    - 解码事件
-   - 分发到处理器/收集器
-5. Close() - 清理资源
+   - 分发给处理器
+4. Stop() - 停止事件收集
+5. Close() - 清理所有资源
 ```
 
-### 3. 配置层 (`user/config/`)
+### 4. 工厂层 (`internal/factory/`)
 
-**接口 (`iconfig.go`)：**
+**探针工厂 (`probe_factory.go`)：**
 ```go
-type IConfig interface {
-    Check() error
-    GetPid() uint64
-    GetUid() uint64
-    GetHex() bool
-    GetBTF() uint8
-    GetDebug() bool
-    GetByteCodeFileMode() uint8
-    // ... setter 和 getter
-    Bytes() []byte  // JSON 序列化
-}
+type ProbeType string
+
+const (
+    ProbeTypeBash     ProbeType = "Bash"
+    ProbeTypeZsh      ProbeType = "Zsh"
+    ProbeTypeMySQL    ProbeType = "MySQL"
+    ProbeTypePostgres ProbeType = "postgres"
+    ProbeTypeOpenSSL  ProbeType = "OpenSSL"
+    ProbeTypeGnuTLS   ProbeType = "GnuTLS"
+    ProbeTypeNSPR     ProbeType = "NSPR"
+    ProbeTypeGoTLS    ProbeType = "GoTLS"
+)
+
+// CreateProbe 创建新的探针实例
+func CreateProbe(probeType ProbeType) (domain.Probe, error)
+
+// RegisterProbe 注册探针构造函数
+func RegisterProbe(probeType ProbeType, constructor ProbeConstructor) error
 ```
 
-**基础配置 (`common.go`)：**
+### 5. 配置层 (`internal/config/`)
+
+**基础配置 (`base_config.go`)：**
 ```go
 type BaseConfig struct {
-    Pid          uint64
-    Uid          uint64
-    Listen       string
-    TruncateSize uint64
+    Pid                uint64
+    Uid                uint64
+    Listen             string
+    TruncateSize       uint64
     PerCpuMapSize      int
     IsHex              bool
     Debug              bool
@@ -285,43 +339,43 @@ type BaseConfig struct {
 ```
 
 **模块特定配置：**
-- `config_openssl.go` - OpenSSL/BoringSSL 配置
-- `config_gnutls.go` - GnuTLS 配置
-- `config_gotls.go` - GoTLS 配置
-- `config_nspr.go` - NSS/NSPR 配置
-- `config_bash.go` - Bash 配置
-- `config_zsh.go` - Zsh 配置
-- `config_mysqld.go` - MySQL 配置
-- `config_postgres.go` - PostgreSQL 配置
+- `openssl/config.go` - OpenSSL/BoringSSL 配置
+- `gnutls/config.go` - GnuTLS 配置
+- `gotls/config.go` - GoTLS 配置
+- `nspr/config.go` - NSS/NSPR 配置
+- `bash/config.go` - Bash 配置
+- `mysql/config.go` - MySQL 配置
+- `postgres/config.go` - PostgreSQL 配置
 
 **平台变体：**
-- `common_linux.go` - Linux 特定
-- `common_androidgki.go` - Android GKI 特定
-- `config_openssl_linux.go` / `config_openssl_androidgki.go`
-- `config_gnutls_linux.go` / `config_gnutls_androidgki.go`
-- `config_nspr_linux.go` / `config_nspr_androidgki.go`
+- `openssl/config_linux.go` / `openssl/config_ecandroid.go`
+- `gnutls/config_linux.go` / `gnutls/config_ecandroid.go`
 
-**常量：**
-```go
-// 捕获模式
-TlsCaptureModelText   = "text"
-TlsCaptureModelPcap   = "pcap"
-TlsCaptureModelPcapngng = "pcapng"
-TlsCaptureModelKey    = "key"
-TlsCaptureModelKeylog = "keylog"
+### 6. 事件层 (`internal/events/`)
 
-// BTF 模式
-BTFModeAutoDetect = 0
-BTFModeCore       = 1
-BTFModeNonCore    = 2
+**分发器 (`dispatcher.go`)：**
+- 注册处理器
+- 将事件分发给所有注册的处理器
+- 管理处理器生命周期
 
-// 字节码文件模式
-ByteCodeFileAll     = 0
-ByteCodeFileCore    = 1
-ByteCodeFileNonCore = 2
-```
+### 7. 输出层 (`internal/output/`)
 
-### 4. eBPF 内核层 (`kern/`)
+**编码器 (`output/encoders/`)：**
+- `json_encoder.go` - JSON 格式编码
+- `plain_encoder.go` - 纯文本编码
+- `protobuf_encoder.go` - Protobuf 编码
+
+**写入器 (`output/writers/`)：**
+- `stdout_writer.go` - 控制台输出
+- `file_writer.go` - 文件输出（支持可选轮转）
+- `tcp_writer.go` - TCP 套接字输出
+- `websocket_writer.go` - WebSocket 输出
+- `keylog_writer.go` - SSL 密钥日志格式
+- `pcap_writer.go` - PCAP/PCAPNG 格式
+- `logger_writer.go` - 基于日志的输出
+- `factory.go` - 写入器工厂
+
+### 8. eBPF 内核层 (`kern/`)
 
 **核心头文件：**
 
@@ -357,7 +411,7 @@ const volatile u64 target_uid = 0;
 
 **内核程序：**
 
-**OpenSSL/BoringSSL（13 个版本）：**
+**OpenSSL/BoringSSL（17+5 个版本）：**
 - `openssl_1_0_2a_kern.c` - OpenSSL 1.0.2
 - `openssl_1_1_0a_kern.c` - OpenSSL 1.1.0
 - `openssl_1_1_1a_kern.c` - OpenSSL 1.1.1 (alpha)
@@ -377,10 +431,10 @@ const volatile u64 target_uid = 0;
 - `openssl_3_4_1_kern.c` - OpenSSL 3.4.1
 - `openssl_3_5_0_kern.c` - OpenSSL 3.5.0
 - `boringssl_na_kern.c` - BoringSSL（原生）
-- `boringssl_a_13_kern.c` - BoringSSL（arm 1.3）
-- `boringssl_a_14_kern.c` - BoringSSL（arm 1.4）
-- `boringssl_a_15_kern.c` - BoringSSL（arm 1.5）
-- `boringssl_a_16_kern.c` - BoringSSL（arm 1.6）
+- `boringssl_a_13_kern.c` - BoringSSL（Android 13）
+- `boringssl_a_14_kern.c` - BoringSSL（Android 14）
+- `boringssl_a_15_kern.c` - BoringSSL（Android 15）
+- `boringssl_a_16_kern.c` - BoringSSL（Android 16）
 
 **其他库：**
 - `gotls_kern.c` - Go TLS (crypto/tls)
@@ -405,96 +459,12 @@ const volatile u64 target_uid = 0;
 - `SEC("tc")` - 流量控制（TC）
 - `SEC("tracepoint")` - 内核跟踪点
 
-### 5. 事件层 (`user/event/`)
-
-**接口 (`ievent.go`)：**
-```go
-type IEventStruct interface {
-    Decode(payload []byte) (err error)
-    Payload() []byte
-    PayloadLen() int
-    String() string
-    StringHex() string
-    Clone() IEventStruct
-    EventType() Type
-    GetUUID() string
-    Base() Base
-    ToProtobufEvent() *pb.Event
-}
-```
-
-**事件类型：**
-- `TypeOutput` - 上传到服务器或写入日志文件
-- `TypeModuleData` - 模块缓存数据
-- `TypeEventProcessor` - 通过 event_processor 显示
-
-**基础结构 (`event_base.go`)：**
-```go
-type Base struct {
-    Timestamp int64  `json:"timestamp"`
-    UUID      string `json:"uuid"`
-    SrcIP     string `json:"src_ip"`
-    SrcPort   uint32 `json:"src_port"`
-    DstIP     string `json:"dst_ip"`
-    DstPort   uint32 `json:"dst_port"`
-    PID       int64  `json:"pid"`
-    PName     string `json:"pname"`
-    Type      uint32 `json:"type"`
-    Length    uint32 `json:"length"`
-}
-```
-
-**模块特定事件：**
-- `event_openssl.go` - OpenSSL/BoringSSL 事件
-- `event_gotls.go` - GoTLS 事件
-- `event_gnutls.go` - GnuTLS 事件
-- `event_nspr.go` - NSS/NSPR 事件
-- `event_bash.go` - Bash 命令事件
-- `event_zsh.go` - Zsh 命令事件
-- `event_mysqld.go` - MySQL 查询事件
-- `event_postgres.go` - PostgreSQL 查询事件
-
-**特殊事件：**
-- `event_masterkey.go` - 主密钥事件
-- `event_mastersecret_gotls.go` - GoTLS 主密钥
-- `event_mastersecret_gnutls.go` - GnuTLS 主密钥
-- `event_openssl_tc.go` - OpenSSL TC 数据包事件
-- `misc.go` - 杂项工具
-
-**收集器写入器：**
-```go
-type CollectorWriter struct {
-    logger *zerolog.Logger
-}
-```
-
-### 6. 处理层 (`pkg/event_processor/`)
-
-**组件：**
-
-| 文件 | 描述 |
-|------|-------------|
-| `processor.go` | 主事件处理器 |
-| `http_request.go` | HTTP/1.x 请求解析 |
-| `http_response.go` | HTTP/1.x 响应解析 |
-| `http2_request.go` | HTTP/2 请求解析 |
-| `http2_response.go` | HTTP/2 响应解析 |
-| `iworker.go` | Worker 接口 |
-| `iparser.go` | Parser 接口 |
-
-**HTTP 解析器功能：**
-- HTTP/1.0、HTTP/1.1、HTTP/2 支持
-- 头部解析和显示
-- 主体内容提取
-- 协议检测
-- HPACK（HTTP/2 头部压缩）
-
-### 7. 工具包 (`pkg/`)
+### 9. 工具包 (`pkg/`)
 
 | 包 | 描述 |
 |---------|-------------|
 | `ecaptureq/` | 用于 eCaptureQ 协议的 WebSocket 服务器 |
-| `event_processor/` | HTTP/TLS 事件处理 |
+| `event_processor/` | HTTP/TLS 事件处理（遗留） |
 | `proc/` | 进程和 ELF 文件工具 |
 | `upgrade/` | 版本升级检查（GitHub releases） |
 | `util/ebpf/` | eBPF 环境工具 |
@@ -504,24 +474,7 @@ type CollectorWriter struct {
 | `util/roratelog/` | 可轮转日志文件写入器 |
 | `util/ws/` | WebSocket 客户端 |
 
-**eCaptureQ 包 (`pkg/ecaptureq/`)：**
-- `server.go` - WebSocket 服务器
-- `client.go` - WebSocket 客户端
-- `hub.go` - 连接中心
-
-### 8. Protobuf 层 (`protobuf/`)
-
-**用于 eCaptureQ 通信的 Protocol Buffers：**
-
-**架构 (`protobuf/proto/v1/`)：**
-- 定义用于跨平台通信的事件结构
-- 版本 1 协议规范
-
-**生成代码 (`protobuf/gen/v1/`)：**
-- 从 .proto 文件生成的 Go 代码
-- 被 eCaptureQ 客户端/服务器使用
-
-### 9. 构建系统
+### 10. 构建系统
 
 **Makefile 结构：**
 
@@ -548,13 +501,13 @@ type CollectorWriter struct {
 
 **构建流程：**
 ```
-1. make ebpf
+1. make ebpf / make ebpf_noncore
    └── clang: 编译 *.c → *.o (eBPF 字节码)
 
-2. make assets
+2. make assets / make assets_noncore
    └── go-bindata: 嵌入 *.o → assets/ebpf_probe.go
 
-3. make build
+3. make build / make build_noncore
    └── go build: 编译 Go + assets → bin/ecapture
 ```
 
@@ -569,17 +522,30 @@ type CollectorWriter struct {
 ### 捕获流程（OpenSSL 示例）
 
 ```
-1. CLI 命令：`sudo ecapture tls -m text`
+1. CLI 命令：sudo ecapture tls -m text
    │
    ▼
-2. 模块初始化：probe_openssl.Init()
+2. 探针创建：factory.CreateProbe(ProbeTypeOpenSSL)
+   ├─ 从注册表获取构造函数
+   └─ 创建探针实例
+   │
+   ▼
+3. 探针初始化：probe.Initialize(ctx, config)
+   ├─ BaseProbe: 创建分发器
+   ├─ BaseProbe: 创建输出处理器
+   ├─ BaseProbe: 注册处理器
+   └─ OpenSSLProbe: 版本特定设置
+   │
+   ▼
+4. 探针启动：probe.Start(ctx)
    ├─ 从 assets 加载 eBPF 字节码
    ├─ 将 eBPF 程序加载到内核
-   ├─ 将 kprobes/uprobes 附加到 SSL 函数
-   └─ 创建 perf/ringbuf 事件 maps
+   ├─ 将 uprobes/kprobes/TC 附加到函数
+   ├─ 获取事件 maps
+   └─ 启动 perf/ringbuf 事件读取器
    │
    ▼
-3. 内核空间（eBPF 程序）
+5. 内核空间（eBPF 程序）
    ├─ Hook SSL_write() / SSL_read() 函数
    ├─ 捕获明文数据
    ├─ 提取连接元组（src/dst IP:port）
@@ -587,21 +553,21 @@ type CollectorWriter struct {
    └─ 从 hook 返回
    │
    ▼
-4. 用户空间事件循环
-   ├─ 从 perf/ringbuf 读取事件
-   ├─ 解码事件（event_openssl.Decode()）
-   ├─ 处理事件（event_processor）
-   └─ 输出到控制台/文件/socket
+6. 用户空间事件循环
+   ├─ 从 perf/ringbuf 读取事件（perfEventLoop）
+   ├─ 解码事件（decoder.Decode()）
+   ├─ 分发事件（dispatcher.Dispatch()）
+   └─ 处理器处理并输出
    │
    ▼
-5. 显示
+7. 输出
    └─ 打印明文或保存到文件
 ```
 
 ### eCaptureQ 流程
 
 ```
-1. 服务器模式：`sudo ecapture --ecaptureq=:8090 tls`
+1. 服务器模式：sudo ecapture --ecaptureq=:8090 tls
    │
    ▼
 2. WebSocket 服务器启动
@@ -624,30 +590,43 @@ type CollectorWriter struct {
 
 ## 关键设计模式
 
-### 1. 模块注册器模式
-- 模块通过 `RegisteFunc()` 自注册
-- 通过 `GetModuleFunc()` 按名称查找
-- 支持动态模块加载
+### 1. 工厂模式
+- 探针通过 `factory.RegisterProbe()` 自注册
+- 通过 `factory.CreateProbe()` 按名称查找
+- 支持动态探针加载
 
-### 2. 基于接口的架构
-- 所有探针模块使用 `IModule`
-- 所有配置使用 `IConfig`
-- 所有事件使用 `IEventStruct`
+### 2. 基于接口的架构（v2 新特性）
+- 所有探针使用 `domain.Probe`
+- 所有配置使用 `domain.Configuration`
+- 所有事件使用 `domain.Event`
+- 所有事件解码器使用 `domain.EventDecoder`
 - 支持多态和测试
+- 清晰的关注点分离
 
-### 3. BTF 自动检测
+### 3. Handler 模式（v2 新特性）
+- 输出逻辑分离为 Handlers
+- TextHandler, KeylogHandler, PcapHandler
+- 灵活的多输出组合
+- 易于添加新的输出格式
+
+### 4. 领域驱动设计（v2 新特性）
+- `internal/domain/` - 纯接口定义
+- 领域层无外部依赖
+- 易于 mock 和测试
+
+### 5. BTF 自动检测
 - 检测内核 BTF 支持
 - 选择 CORE 或 non-CORE 字节码
 - 失败时回退到 non-CORE
 
-### 4. 事件处理管道
+### 6. 事件处理管道
 ```
-eBPF → Event → Decode → Process → Output
-  ↑                                        ↓
-  └────────── Config ───────────────────────┘
+eBPF → Event → Decode → Dispatcher → Handler(s) → Output
+  ↑                                              ↓
+  └────────── Config ────────────────────────────┘
 ```
 
-### 5. 平台抽象
+### 7. 平台抽象
 - 用于 Linux/Android 的构建标签
 - 平台特定实现
 - 条件编译
@@ -673,32 +652,34 @@ eBPF → Event → Decode → Process → Output
 
 ## 开发指南
 
-### 添加新模块
+### 添加新探针（新架构）
 
 1. **创建 eBPF 程序** (`kern/mylib_kern.c`)
    - 定义 hook 函数
    - 捕获并发送事件
 
-2. **创建事件结构** (`user/event/event_mylib.go`)
-   - 实现 `IEventStruct`
-   - 定义解码逻辑
+2. **定义领域类型**（如需要）
+   - 如需要新接口，添加到 `internal/domain/`
 
-3. **创建配置** (`user/config/config_mylib.go`)
-   - 实现 `IConfig`
-   - 定义模块特定标志
+3. **创建事件结构** (`internal/probe/mylib/event.go`)
+   - 实现事件解码
 
-4. **创建模块** (`user/module/probe_mylib.go`)
-   - 实现 `IModule`
-   - 使用 `RegisteFunc()` 注册
+4. **创建配置** (`internal/probe/mylib/config.go`)
+   - 实现 `domain.Configuration`
 
-5. **创建 CLI 命令** (`cli/cmd/mylib.go`)
+5. **创建探针** (`internal/probe/mylib/mylib_probe.go`)
+   - 嵌入 `base.BaseProbe`
+   - 实现探针特定逻辑
+   - 在 `init()` 中使用 `factory.RegisterProbe()` 注册
+
+6. **创建 CLI 命令** (`cli/cmd/mylib.go`)
    - 添加 Cobra 命令
-   - 调用 `runModule()`
+   - 调用 `runProbe()`
 
-6. **更新 Makefile**
-   - 添加到 `*TARGETS` 或 `TARGETS_NOCORE`
+7. **更新 Makefile**
+   - 添加到 `TARGETS`
 
-7. **重新构建**
+8. **重新构建**
    ```bash
    make clean && make
    ```
@@ -729,10 +710,10 @@ dlv debug bin/ecapture -- --tls
 
 | 类别 | 数量 |
 |----------|--------|
-| CLI Go 文件 | 20 |
-| pkg Go 文件 | 38 |
-| user Go 文件 | 68 |
-| Go 文件总数 | ~126 |
+| CLI Go 文件 | 20+ |
+| pkg Go 文件 | 38+ |
+| internal Go 文件 | 70+ |
+| Go 文件总数 | ~130+ |
 | eBPF C 文件 | 36 |
 | eBPF 头文件 | 20 |
 | Protobuf 文件 | 可变 |
@@ -757,6 +738,32 @@ dlv debug bin/ecapture -- --tls
 
 ---
 
+## 架构迁移说明（v1 → v2）
+
+### v1 到 v2 的主要变化：
+
+1. **目录重组**
+   - `user/` → `internal/`
+   - 新增 `domain/`、`events/`、`output/`、`factory/`、`errors/`、`logger/` 包
+
+2. **接口驱动设计**
+   - `internal/domain/` 中的纯领域接口
+   - 更好的关注点分离
+
+3. **Handler 模式**
+   - 输出逻辑移至 Handlers
+   - 更灵活的输出组合
+
+4. **错误包**
+   - 集中的错误定义
+   - 更好的错误包装和错误码
+
+### 向后兼容性：
+- 遗留的 `pkg/event_processor/` 仍然存在
+- 支持渐进式迁移
+
+---
+
 ## 测试
 
 **单元测试：**
@@ -769,6 +776,7 @@ go test ./...
 make e2e-tls      # TLS 模块
 make e2e-gnutls    # GnuTLS 模块
 make e2e-gotls     # GoTLS 模块
+make e2e-bash      # Bash 模块
 make e2e            # 所有测试
 ```
 
@@ -787,5 +795,6 @@ make e2e            # 所有测试
 
 ---
 
-*生成时间：2026-03-21*
-*项目版本：eCapture v1.5.2*
+*生成时间：2026-03-24*
+*项目版本：eCapture v2.0.1*
+*架构：v2 (internal/ 层)*
